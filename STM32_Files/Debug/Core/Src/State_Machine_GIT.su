@@ -1,0 +1,9 @@
+../Core/Src/State_Machine_GIT.c:3:6:LCD_Init	16	static
+../Core/Src/State_Machine_GIT.c:204:6:RS1	16	static
+../Core/Src/State_Machine_GIT.c:530:6:RS2	16	static
+../Core/Src/State_Machine_GIT.c:539:6:RS3	16	static
+../Core/Src/State_Machine_GIT.c:676:6:RS4	16	static
+../Core/Src/State_Machine_GIT.c:692:6:RS5	16	static
+../Core/Src/State_Machine_GIT.c:714:6:RS_DO	16	static
+../Core/Src/State_Machine_GIT.c:856:6:int_status_check	24	static
+../Core/Src/State_Machine_GIT.c:957:6:tc358870_HDMI_TimChk	40	static

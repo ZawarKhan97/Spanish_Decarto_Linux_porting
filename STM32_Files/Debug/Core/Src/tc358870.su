@@ -1,0 +1,7 @@
+../Core/Src/tc358870.c:3:9:i2c1_uh2cd_write8	48	static
+../Core/Src/tc358870.c:20:9:i2c1_uh2cd_write16	48	static
+../Core/Src/tc358870.c:41:9:i2c1_uh2cd_write32	48	static
+../Core/Src/tc358870.c:60:9:i2c1_uh2cd_read8	40	static
+../Core/Src/tc358870.c:68:10:i2c1_uh2cd_read16	40	static
+../Core/Src/tc358870.c:76:10:i2c1_uh2cd_read32	40	static
+../Core/Src/tc358870.c:86:6:data_send_COM_Info	104	static

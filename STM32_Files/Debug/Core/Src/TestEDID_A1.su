@@ -1,0 +1,4 @@
+../Core/Src/TestEDID_A1.c:4:6:TestEDID_A1	16	static
+../Core/Src/TestEDID_A1.c:266:6:RS2_A1	16	static
+../Core/Src/TestEDID_A1.c:275:6:RS3_A1	16	static
+../Core/Src/TestEDID_A1.c:365:6:RS5_A1	16	static
