@@ -20,10 +20,11 @@
  #include <syslog.h>
  #include <stdarg.h>
  #include <unistd.h>
+ #include <time.h>
 
 
 
-#define I2C_DEV_PATH "/dev/i2c-8"  // Change as needed
+#define I2C_DEV_PATH "/dev/i2c-1"  // Change as needed
 #define I2C_ADDR     0x0F          // TC358870 I2C address
 
 //Function Prototypes
@@ -58,41 +59,70 @@ int i2c_write8(int fd, uint16_t reg, uint8_t data) {
     buf[1] = reg & 0xFF;
     buf[2] = data;
 
+    klog("<7>tc358870: Attempting I2C8 write: reg 0x%04X, data 0x%02X", reg, data);
+
     if (write(fd, buf, 3) != 3) {
-        klog("<3>tc358870: i2c_write8 failed at reg 0x%04X: %s", reg, strerror(errno));
+        klog("<3>tc358870: i2c_write8 failed at reg 0x%04X: %s (errno=%d)", reg, strerror(errno), errno);
         return -1;
     }
 
+    // Add delay like STM32
+    usleep(100000); // 100ms delay like STM32 HAL_Delay(100)
+
+    // Verify write by reading back (like STM32 does)
     uint8_t read_val = 0;
-    if (i2c_read8(fd, reg, &read_val) != 0 || read_val != data) {
+    if (i2c_read8(fd, reg, &read_val) != 0) {
+        klog("<3>tc358870: i2c_write8 verify read failed at 0x%04X: %s", reg, strerror(errno));
+        return -1;
+    }
+    
+    if (read_val != data) {
         klog("<3>tc358870: i2c_write8 verify failed at 0x%04X: wrote 0x%02X, read 0x%02X", reg, data, read_val);
         return -1;
     }
 
-    klog("<6>tc358870: I2C8: Wrote 0x%02X to reg 0x%04X", data, reg);
+    klog("<6>tc358870: I2C8: Successfully wrote 0x%02X to reg 0x%04X", data, reg);
     return 0;
 }
 
-// Write 16-bit register, 16-bit data
+// Write 16-bit register, 16-bit data - STM32 compatible
 int i2c_write16(int fd, uint16_t reg, uint16_t data) {
     uint8_t buf[4];
     buf[0] = (reg >> 8) & 0xFF;
     buf[1] = reg & 0xFF;
-    buf[2] = (data >> 8) & 0xFF;
-    buf[3] = data & 0xFF;
+    // STM32 byte order: low byte first, then high byte
+    buf[2] = data & 0xFF;        // Low byte first (like STM32)
+    buf[3] = (data >> 8) & 0xFF; // High byte second (like STM32)
+
+    klog("<7>tc358870: Attempting I2C16 write: reg 0x%04X, data 0x%04X", reg, data);
 
     if (write(fd, buf, 4) != 4) {
-         klog("<3>tc358870: i2c_write16 failed at reg 0x%04X: %s", reg, strerror(errno));
+         klog("<3>tc358870: i2c_write16 failed at reg 0x%04X: %s (errno=%d)", reg, strerror(errno), errno);
         return -1;
     }
 
+    // Add delay like STM32
+    usleep(100000); // 100ms delay like STM32 HAL_Delay(100)
+
+    // Skip verification for register 0x0504 (like STM32 does)
+    if (reg == 0x0504) {
+        klog("<6>tc358870: I2C16: Wrote 0x%04X to reg 0x%04X (no verify - like STM32)", data, reg);
+        return 0;
+    }
+    
+    // Verify write by reading back (like STM32 does)
     uint16_t read_val = 0;
-    if (i2c_read16(fd, reg, &read_val) != 0 || read_val != data) {
+    if (i2c_read16(fd, reg, &read_val) != 0) {
+        klog("<3>tc358870: i2c_write16 verify read failed at 0x%04X: %s", reg, strerror(errno));
+        return -1;
+    }
+    
+    if (read_val != data) {
         klog("<3>tc358870: i2c_write16 verify failed at 0x%04X: wrote 0x%04X, read 0x%04X", reg, data, read_val);
         return -1;
     }
 
-    klog("<6>tc358870: I2C16: Wrote 0x%04X to reg 0x%04X", data, reg);
+    klog("<6>tc358870: I2C16: Successfully wrote 0x%04X to reg 0x%04X", data, reg);
     return 0;
 }
 
@@ -102,17 +132,22 @@ int i2c_read8(int fd, uint16_t reg, uint8_t *out) {
         reg & 0xFF
     };
 
+    klog("<7>tc358870: Attempting I2C8 read: reg 0x%04X", reg);
+
     if (write(fd, addr_buf, 2) != 2) {
-        klog("<3>tc358870: i2c_read8 - write failed at reg 0x%04X: %s", reg, strerror(errno));
+        klog("<3>tc358870: i2c_read8 - write failed at reg 0x%04X: %s (errno=%d)", reg, strerror(errno), errno);
         return -1;
     }
+
+    // Add small delay like STM32
+    usleep(1000); // 1ms delay like STM32 HAL_Delay(1)
 
     if (read(fd, out, 1) != 1) {
-        klog("<3>tc358870: i2c_read8 - read failed at reg 0x%04X: %s", reg, strerror(errno));
+        klog("<3>tc358870: i2c_read8 - read failed at reg 0x%04X: %s (errno=%d)", reg, strerror(errno), errno);
         return -1;
     }
 
-    klog("<7>tc358870: I2C8: Read 0x%02X from reg 0x%04X", *out, reg);
+    klog("<7>tc358870: I2C8: Successfully read 0x%02X from reg 0x%04X", *out, reg);
     return 0;
 }
 
@@ -123,19 +158,35 @@ int i2c_read16(int fd, uint16_t reg, uint16_t *out) {
     };
     uint8_t data[2];
 
+    klog("<7>tc358870: Attempting I2C16 read: reg 0x%04X", reg);
+
     if (write(fd, addr_buf, 2) != 2) {
-        klog("<3>tc358870: i2c_read16 - write failed at reg 0x%04X: %s", reg, strerror(errno));
+        klog("<3>tc358870: i2c_read16 - write failed at reg 0x%04X: %s (errno=%d)", reg, strerror(errno), errno);
         return -1;
     }
+
+    // Add small delay like STM32
+    usleep(1000); // 1ms delay like STM32 HAL_Delay(1)
 
     if (read(fd, data, 2) != 2) {
-        klog("<3>tc358870: i2c_read16 - read failed at reg 0x%04X: %s", reg, strerror(errno));
+        klog("<3>tc358870: i2c_read16 - read failed at reg 0x%04X: %s (errno=%d)", reg, strerror(errno), errno);
         return -1;
     }
 
-    *out = (data[0] << 8) | data[1];
+    // STM32 byte order: (temp[1]<<8)|temp[0] - low byte first
+    *out = (data[1] << 8) | data[0];
 
-    klog("<7>tc358870: I2C16: Read 0x%04X from reg 0x%04X", *out, reg);
+    klog("<7>tc358870: I2C16: Successfully read 0x%04X from reg 0x%04X", *out, reg);
+    return 0;
+}
+
+// Helper function for EDID data writes with error handling
+int write_edid_data(int fd, uint16_t offset, uint8_t data) {
+    uint16_t reg = 0x8C00 + offset;
+    if (i2c_write8(fd, reg, data) != 0) {
+        klog("<3>tc358870: Failed to write EDID data at offset 0x%04X (reg 0x%04X), data 0x%02X", offset, reg, data);
+        return -1;
+    }
     return 0;
 }
 
@@ -143,10 +194,16 @@ int rs2(int fd) {
     klog("<6>tc358870: RS2 - Ready state initialization started");
 
     // Enable Interrupts 
-    i2c_write16(fd, 0x0016, 0x0D3F); // IntMask
+    if (i2c_write16(fd, 0x0016, 0x0D3F) != 0) { // IntMask
+        klog("<3>tc358870: RS2 failed to write IntMask");
+        return -1;
+    }
 
     // Set HPD output to high
-    i2c_write8(fd, 0x854A, 0x01); // SysCtl
+    if (i2c_write8(fd, 0x854A, 0x01) != 0) { // SysCtl
+        klog("<3>tc358870: RS2 failed to write SysCtl for HPD");
+        return -1;
+    }
 
     klog("<6>tc358870: RS2 complete, HPD asserted");
     return 0;
@@ -158,36 +215,108 @@ int tc358870_init(int fd) {
 
     // --- Reset & System Control ---
     //Sofware Reset
-    i2c_write16(fd, 0x0004, 0x0004); // ConfCtl0 (Software Reset)
-    i2c_write16(fd, 0x0002, 0x3F00); // SysCtl
-    i2c_write16(fd, 0x0002, 0x0000); // SysCtl
-    i2c_write16(fd, 0x0006, 0x0008); // ConfCtl1
+    klog("<6>tc358870: Step 1: Software Reset");
+    if (i2c_write16(fd, 0x0004, 0x0004) != 0) { // ConfCtl0 (Software Reset)
+        klog("<3>tc358870: Failed to write software reset");
+        return -1;
+    }
+    usleep(10000); // 10ms delay
+    if (i2c_write16(fd, 0x0002, 0x3F00) != 0) { // SysCtl
+        klog("<3>tc358870: Failed to write SysCtl 0x3F00");
+        return -1;
+    }
+    if (i2c_write16(fd, 0x0002, 0x0000) != 0) { // SysCtl
+        klog("<3>tc358870: Failed to write SysCtl 0x0000");
+        return -1;
+    }
+    if (i2c_write16(fd, 0x0006, 0x0008) != 0) { // ConfCtl1
+        klog("<3>tc358870: Failed to write ConfCtl1");
+        return -1;
+    }
 
     // HDMI Interrupt Mask, Clear
-    i2c_write16(fd, 0x0016, 0x0F3F); // IntMask
-    i2c_write8(fd,  0x8502, 0xFF);   // SYS_INT
-    i2c_write8(fd,  0x850B, 0xFF);   // MISC_INT
-    i2c_write16(fd, 0x0014, 0x0F3F); // IntStatus
-    i2c_write8(fd,  0x8512, 0xFE);   // SYS_INTM
-    i2c_write8(fd,  0x851B, 0xFD);   // MISC_INTM
+    klog("<6>tc358870: Step 2: HDMI Interrupt Configuration");
+    if (i2c_write16(fd, 0x0016, 0x0F3F) != 0) { // IntMask
+        klog("<3>tc358870: Failed to write IntMask");
+        return -1;
+    }
+    if (i2c_write8(fd,  0x8502, 0xFF) != 0) {   // SYS_INT
+        klog("<3>tc358870: Failed to write SYS_INT");
+        return -1;
+    }
+    if (i2c_write8(fd,  0x850B, 0xFF) != 0) {   // MISC_INT
+        klog("<3>tc358870: Failed to write MISC_INT");
+        return -1;
+    }
+    if (i2c_write16(fd, 0x0014, 0x0F3F) != 0) { // IntStatus
+        klog("<3>tc358870: Failed to write IntStatus");
+        return -1;
+    }
+    if (i2c_write8(fd,  0x8512, 0xFE) != 0) {   // SYS_INTM
+        klog("<3>tc358870: Failed to write SYS_INTM");
+        return -1;
+    }
+    if (i2c_write8(fd,  0x851B, 0xFD) != 0) {   // MISC_INTM
+        klog("<3>tc358870: Failed to write MISC_INTM");
+        return -1;
+    }
 
     // --- HDMI PHY ---
-    i2c_write8(fd, 0x8410, 0x03); // PHY CTL
-    i2c_write8(fd, 0x8413, 0x3F); // PHY_ENB
-    i2c_write8(fd, 0x8420, 0x07); // EQ_BYPS
-    i2c_write8(fd, 0x84F0, 0x31); // APLL_CTL
-    i2c_write8(fd, 0x84F4, 0x01); // DDCIO_CTL
+    klog("<6>tc358870: Step 3: HDMI PHY Configuration");
+    if (i2c_write8(fd, 0x8410, 0x03) != 0) { // PHY CTL
+        klog("<3>tc358870: Failed to write PHY CTL");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x8413, 0x3F) != 0) { // PHY_ENB
+        klog("<3>tc358870: Failed to write PHY_ENB");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x8420, 0x07) != 0) { // EQ_BYPS
+        klog("<3>tc358870: Failed to write EQ_BYPS");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x84F0, 0x31) != 0) { // APLL_CTL
+        klog("<3>tc358870: Failed to write APLL_CTL");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x84F4, 0x01) != 0) { // DDCIO_CTL
+        klog("<3>tc358870: Failed to write DDCIO_CTL");
+        return -1;
+    }
 
     // --- HDMI Clock ---
-    i2c_write16(fd, 0x8540, 0x12C0); // SYS_FREQ0_1
-    i2c_write8(fd,  0x8630, 0x00);   // LOCKDET_FREQ0
-    i2c_write16(fd, 0x8631, 0x0753); // LOCKDET_REF1_2
-    i2c_write8(fd,  0x8670, 0x02);   // NCO_F0_MOD
-    i2c_write16(fd, 0x8A0C, 0x12C0); // CSC_SCLK0_1
+    klog("<6>tc358870: Step 4: HDMI Clock Configuration");
+    if (i2c_write16(fd, 0x8540, 0x12C0) != 0) { // SYS_FREQ0_1
+        klog("<3>tc358870: Failed to write SYS_FREQ0_1");
+        return -1;
+    }
+    if (i2c_write8(fd,  0x8630, 0x00) != 0) {   // LOCKDET_FREQ0
+        klog("<3>tc358870: Failed to write LOCKDET_FREQ0");
+        return -1;
+    }
+    if (i2c_write16(fd, 0x8631, 0x0753) != 0) { // LOCKDET_REF1_2
+        klog("<3>tc358870: Failed to write LOCKDET_REF1_2");
+        return -1;
+    }
+    if (i2c_write8(fd,  0x8670, 0x02) != 0) {   // NCO_F0_MOD
+        klog("<3>tc358870: Failed to write NCO_F0_MOD");
+        return -1;
+    }
+    if (i2c_write16(fd, 0x8A0C, 0x12C0) != 0) { // CSC_SCLK0_1
+        klog("<3>tc358870: Failed to write CSC_SCLK0_1");
+        return -1;
+    }
 
     // --- EDID Block ---
-    i2c_write8(fd,  0x85E0, 0x01);   // EDID_MODE
-    i2c_write16(fd, 0x85E3, 0x0100); // EDID_LEN1_2
+    klog("<6>tc358870: Step 5: EDID Configuration");
+    if (i2c_write8(fd,  0x85E0, 0x01) != 0) {   // EDID_MODE
+        klog("<3>tc358870: Failed to write EDID_MODE");
+        return -1;
+    }
+    if (i2c_write16(fd, 0x85E3, 0x0100) != 0) { // EDID_LEN1_2
+        klog("<3>tc358870: Failed to write EDID_LEN1_2");
+        return -1;
+    }
 
     // TODO: Write EDID RAM (i2c_write8(fd, 0x8C00 + offset, value))
     
@@ -450,36 +579,79 @@ int tc358870_init(int fd) {
     i2c_write8(fd,0x8CFF, 0xEA); // EDID_RAM
 
     // --- HDCP and HDMI SYSTEM ---
-    i2c_write8(fd, 0x8543, 0x02); // DDC_CTL
-    i2c_write8(fd, 0x8544, 0x10); // HPD_CTL
+    klog("<6>tc358870: Step 6: HDCP and HDMI System Configuration");
+    if (i2c_write8(fd, 0x8543, 0x02) != 0) { // DDC_CTL
+        klog("<3>tc358870: Failed to write DDC_CTL");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x8544, 0x10) != 0) { // HPD_CTL
+        klog("<3>tc358870: Failed to write HPD_CTL");
+        return -1;
+    }
 
     // --- HDMI AUDIO ---
-    i2c_write8(fd, 0x8600, 0x00); // AUD_Auto_Mute
-    i2c_write8(fd, 0x8602, 0xF3); // Auto_CMD0
-    i2c_write8(fd, 0x8603, 0x02); // Auto_CMD1
-    i2c_write8(fd, 0x8604, 0x0C); // Auto_CMD2
-    i2c_write8(fd, 0x8606, 0x05); // BUFINIT_START
-    i2c_write8(fd, 0x8607, 0x00); // FS_MUTE
-    i2c_write8(fd, 0x8652, 0x02); // SDO_MODE1
+    klog("<6>tc358870: Step 7: HDMI Audio Configuration");
+    if (i2c_write8(fd, 0x8600, 0x00) != 0) { // AUD_Auto_Mute
+        klog("<3>tc358870: Failed to write AUD_Auto_Mute");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x8602, 0xF3) != 0) { // Auto_CMD0
+        klog("<3>tc358870: Failed to write Auto_CMD0");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x8603, 0x02) != 0) { // Auto_CMD1
+        klog("<3>tc358870: Failed to write Auto_CMD1");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x8604, 0x0C) != 0) { // Auto_CMD2
+        klog("<3>tc358870: Failed to write Auto_CMD2");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x8606, 0x05) != 0) { // BUFINIT_START
+        klog("<3>tc358870: Failed to write BUFINIT_START");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x8607, 0x00) != 0) { // FS_MUTE
+        klog("<3>tc358870: Failed to write FS_MUTE");
+        return -1;
+    }
+    if (i2c_write8(fd, 0x8652, 0x02) != 0) { // SDO_MODE1
+        klog("<3>tc358870: Failed to write SDO_MODE1");
+        return -1;
+    }
 
     // --- HPD/EDID Detection ---
+    klog("<6>tc358870: Step 8: HPD/EDID Detection");
     uint8_t hpd_status = 0;
-    i2c_read8(fd, 0x8520, &hpd_status);
+    if (i2c_read8(fd, 0x8520, &hpd_status) != 0) {
+        klog("<3>tc358870: Failed to read HPD status");
+        return -1;
+    }
     klog("<6>tc358870: HPD Status = 0x%02X", hpd_status);
 
     if (hpd_status & 0x01) {
         klog("<6>tc358870: HDMI cable detected. Entering RS2...");
-        rs2(fd);
+        if (rs2(fd) != 0) {
+            klog("<3>tc358870: RS2 initialization failed");
+            return -1;
+        }
     }
     else {
         klog("<6>tc358870: No HDMI cable detected. Skipping RS2.");
     }
 
     // --- Enable Interrupts & Sleep ---
-    i2c_write16(fd, 0x0016, 0x0F1F); // IntMask
-    i2c_write16(fd, 0x0002, 0x0001); // SysCtl (Enter Sleep)
+    klog("<6>tc358870: Step 9: Final Configuration");
+    if (i2c_write16(fd, 0x0016, 0x0F1F) != 0) { // IntMask
+        klog("<3>tc358870: Failed to write final IntMask");
+        return -1;
+    }
+    if (i2c_write16(fd, 0x0002, 0x0001) != 0) { // SysCtl (Enter Sleep)
+        klog("<3>tc358870: Failed to write SysCtl for sleep mode");
+        return -1;
+    }
 
-    klog("<6>tc358870: Init sequence completed.");
+    klog("<6>tc358870: Init sequence completed successfully.");
     return 0;
 }
 
