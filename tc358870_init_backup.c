@@ -1,3 +1,4 @@
+
 // Porting Steps
  /* The code you've provided is the initialization sequence: a series of precise I2C register writes and reads used by the STM32 to configure the TC358870 bridge. This sequence handles:
  1. Software reset
@@ -20,54 +21,12 @@
  #include <stdarg.h>
  #include <unistd.h>
  #include <time.h>
-#include <signal.h> // For signal handling
-#include <pthread.h> // For PWM thread
-#include <sys/stat.h> // For file operations
-#include <sys/mman.h> // For GPIO memory mapping
+ #include <signal.h> // For signal handling
 
 
 
 #define I2C_DEV_PATH "/dev/i2c-1"  // Change as needed
 #define I2C_ADDR     0x0F          // TC358870 I2C address
-
-// PWM Constants (matching STM32 Timer 1 configuration)
-#define PWM_PERIOD        640      // Timer period (htim1.Init.Period = 639 + 1)
-#define PWM_MAX_DUTY      13107    // Maximum duty cycle (sConfigOC.Pulse)
-#define BRIGHTNESS_MAX    100      // Maximum brightness percentage
-#define PWM_UPDATE_RATE   50       // PWM update rate in milliseconds
-
-// Jetson Orin NX PWM Hardware Configuration
-#define PWM_CHIP_COUNT    4        // Number of PWM chips to check
-#define PWM_CHANNEL       0        // PWM channel to use
-#define PWM_EXPORT_PATH   "/sys/class/pwm/pwmchip%d/export"
-#define PWM_PERIOD_PATH   "/sys/class/pwm/pwmchip%d/pwm%d/period"
-#define PWM_DUTY_PATH     "/sys/class/pwm/pwmchip%d/pwm%d/duty_cycle"
-#define PWM_ENABLE_PATH   "/sys/class/pwm/pwmchip%d/pwm%d/enable"
-#define PWM_UNEXPORT_PATH "/sys/class/pwm/pwmchip%d/unexport"
-
-// GPIO-based PWM fallback (if hardware PWM not available)
-#define GPIO_PWM_PIN      41       // GPIO41 (PH.07) for PWM output
-#define GPIO_PWM_BASE     0x02434000 // GPIO4 base address
-#define GPIO_PWM_SIZE     0x1000   // GPIO block size
-#define GPIO_OUT_REG      0x000    // Output value register
-#define GPIO_OE_REG       0x004    // Output enable register
-
-// PWM Thread Global Variables
-static pthread_t pwm_thread;
-static int pwm_running = 0;
-static int current_brightness = 50;  // Start at 50%
-static int target_brightness = 50;
-static pthread_mutex_t pwm_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t pwm_condition = PTHREAD_COND_INITIALIZER;
-static int pwm_chip = -1;  // PWM chip number
-static int pwm_exported = 0; // Track if PWM channel is exported
-
-// GPIO-based PWM fallback variables
-static int use_gpio_pwm = 0;  // Flag to use GPIO-based PWM
-static int gpio_mem_fd = -1;  // /dev/mem file descriptor
-static volatile uint32_t *gpio_regs = NULL;  // Mapped GPIO registers
-static int gpio_pwm_high_cycles = 0;  // High cycles for PWM
-static int gpio_pwm_total_cycles = 100;  // Total cycles for PWM
 
 //Function Prototypes
 void klog(const char *fmt, ...);
@@ -81,18 +40,6 @@ int i2c_write32(int fd, uint16_t reg, uint32_t data);
 uint32_t i2c_read32_simple(int fd, uint16_t reg);
 int rs2(int fd);
 int tc358870_init(int fd);
-
-// PWM Thread Function Prototypes
-int init_pwm_thread(void);
-void stop_pwm_thread(void);
-void cleanup_pwm_thread(void);
-int set_brightness(int percentage);
-int get_brightness(void);
-void *pwm_thread_function(void *arg);
-int write_pwm_duty_cycle(int duty_cycle);
-int init_gpio_pwm(void);
-void generate_gpio_pwm(void);
-void signal_handler(int sig);
 
 // Function to poll chip readiness - important for Linux/Jetson systems
 int poll_chip_ready(int fd, uint16_t reg, uint16_t expected_mask, uint16_t expected_value, int max_attempts) {
@@ -187,6 +134,48 @@ int i2c_write8(int fd, uint16_t reg, uint8_t data) {
         return 1; // STM32 returns 1 for failure
     }
 }
+
+
+// // Write 16-bit register, 16-bit data - STM32 compatible
+// int i2c_write16(int fd, uint16_t addr, uint16_t dt) {
+//     uint8_t write_reg[4];
+//     uint32_t data;
+//     write_reg[0]=addr>>8;
+//     write_reg[1]=addr&0xFF;
+//     write_reg[2]=dt&0xFF;
+//     write_reg[3]=(dt>>8);
+
+//     klog("<7>tc358870: Attempting I2C16 write: reg 0x%04X, data 0x%04X", addr, dt);
+
+//     if (write(fd, write_reg, 4) != 4) {
+//         klog("<3>tc358870: i2c_write16 failed at reg 0x%04X: %s (errno=%d)", addr, strerror(errno), errno);
+//         return 1; // STM32 returns 1 for failure
+//     }
+
+//     // Wait for I2C bus to be ready - like STM32 while(HAL_I2C_GetState(hi2c1)!=HAL_I2C_STATE_READY)
+//     if (wait_i2c_ready(fd) != 0) {
+//         klog("<3>tc358870: I2C bus not ready after write to reg 0x%04X", addr);
+//         return 1; // STM32 returns 1 for failure
+//     }
+
+//     // Skip verification for register 0x0504 (like STM32 does)
+//     if (addr != 0x0504) {
+//         // Special delay for register 0x0006 (ConfCtl1) - test timing issue
+//         if (addr == 0x0006) {
+//             klog("<6>tc358870: Adding 50ms delay before verification for reg 0x0006");
+//             usleep(50000); // 50ms delay to test timing issue
+//         }
+        
+//         data=i2c_read16_simple(fd, addr);
+//         if (data!=dt){
+//             klog("<3>tc358870: i2c_write16 verify failed at 0x%04X: wrote 0x%04X, read 0x%04X", addr, dt, data);
+//             return 1;
+//         }
+//         klog("<6>tc358870: I2C16: Successfully wrote 0x%04X to reg 0x%04X", dt, addr);
+//     }
+
+//     return 0;
+// }
 
 
 // Write 16-bit register, 16-bit data - STM32 compatible
@@ -475,6 +464,7 @@ int tc358870_init(int fd) {
         klog("<3>tc358870: Failed to write software reset");
         return 1; // Return 1 for failure
     }
+    usleep(10000); // 10ms delay
     
     // Wait for software reset to complete - critical for Linux/Jetson
     klog("<6>tc358870: Waiting for software reset to complete...");
@@ -487,7 +477,7 @@ int tc358870_init(int fd) {
         klog("<3>tc358870: Failed to write SysCtl 0x0000");
         return 1; // Return 1 for failure
     }
-    if (i2c_write16(fd, 0x0006, 0x0008) != 0) { // ConfCtl1
+    if (i2c_write16(fd, 0x0006, 0x0000) != 0) { // ConfCtl1
         klog("<3>tc358870: Failed to write ConfCtl1");
         return 1; // Return 1 for failure
     }
@@ -917,331 +907,35 @@ int tc358870_init(int fd) {
     return 0; // Return 0 for success
 }
 
-// PWM Thread Functions
-
-// Write PWM duty cycle to sysfs interface or GPIO
-int write_pwm_duty_cycle(int duty_cycle) {
-    if (use_gpio_pwm) {
-        // GPIO-based PWM: calculate duty cycle ratio
-        if (gpio_regs != NULL) {
-            gpio_pwm_high_cycles = (duty_cycle * gpio_pwm_total_cycles) / PWM_MAX_DUTY;
-            klog("<7>tc358870: GPIO PWM duty cycle set to %d/%d", gpio_pwm_high_cycles, gpio_pwm_total_cycles);
-            return 0;
-        } else {
-            klog("<3>tc358870: GPIO PWM not initialized");
-            return -1;
-        }
-    }
-    
-    // Hardware PWM via sysfs
-    if (pwm_chip < 0) {
-        klog("<3>tc358870: PWM not initialized");
-        return -1;
-    }
-    
-    char path[128];
-    snprintf(path, sizeof(path), PWM_DUTY_PATH, pwm_chip, PWM_CHANNEL);
-    
-    FILE *fp = fopen(path, "w");
-    if (!fp) {
-        klog("<3>tc358870: Failed to open PWM duty_cycle file: %s", strerror(errno));
-        return -1;
-    }
-    
-    fprintf(fp, "%d", duty_cycle);
-    fclose(fp);
-    
-    klog("<7>tc358870: PWM duty cycle set to %d", duty_cycle);
-    return 0;
-}
-
-// Main PWM thread function - continuously adjusts brightness
-void *pwm_thread_function(void *arg) {
-    klog("<6>tc358870: PWM thread started");
-    
-    while (pwm_running) {
-        int local_target, local_current;
-        
-        // Safely read current values
-        pthread_mutex_lock(&pwm_mutex);
-        local_target = target_brightness;
-        local_current = current_brightness;
-        pthread_mutex_unlock(&pwm_mutex);
-        
-        // Smooth transition towards target brightness
-        if (local_current < local_target) {
-            local_current++;
-        } else if (local_current > local_target) {
-            local_current--;
-        }
-        
-        // Update current brightness if changed
-        if (local_current != current_brightness) {
-            pthread_mutex_lock(&pwm_mutex);
-            current_brightness = local_current;
-            pthread_mutex_unlock(&pwm_mutex);
-            
-            // Calculate duty cycle based on brightness percentage
-            int duty_cycle = (local_current * PWM_MAX_DUTY) / BRIGHTNESS_MAX;
-            write_pwm_duty_cycle(duty_cycle);
-            
-            // For GPIO PWM, generate the actual PWM signal
-            if (use_gpio_pwm && gpio_regs != NULL) {
-                generate_gpio_pwm();
-            }
-        }
-        
-        // Update rate: 50ms (like STM32 timer)
-        usleep(PWM_UPDATE_RATE * 1000);
-    }
-    
-    klog("<6>tc358870: PWM thread stopped");
-    return NULL;
-}
-
-// Initialize GPIO-based PWM fallback
-int init_gpio_pwm(void) {
-    klog("<6>tc358870: Initializing GPIO-based PWM fallback...");
-    
-    // Open /dev/mem for GPIO access
-    gpio_mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (gpio_mem_fd < 0) {
-        klog("<3>tc358870: Failed to open /dev/mem: %s", strerror(errno));
-        return -1;
-    }
-    
-    // Map GPIO registers
-    long pagesize = sysconf(_SC_PAGESIZE);
-    off_t gpio_page = GPIO_PWM_BASE & ~(pagesize - 1);
-    off_t gpio_offset = GPIO_PWM_BASE & (pagesize - 1);
-    
-    gpio_regs = mmap(NULL, pagesize, PROT_READ | PROT_WRITE, MAP_SHARED, gpio_mem_fd, gpio_page);
-    if (gpio_regs == MAP_FAILED) {
-        klog("<3>tc358870: Failed to map GPIO registers: %s", strerror(errno));
-        close(gpio_mem_fd);
-        gpio_mem_fd = -1;
-        return -1;
-    }
-    
-    // Configure PH.07 as GPIO output
-    volatile uint32_t *padctl = gpio_regs + (0x8C / 4); // PADCTL for PH.07
-    uint32_t original_padctl = padctl[0];
-    klog("<6>tc358870: Original PADCTL[PH.07]: 0x%08x", original_padctl);
-    
-    // Set as GPIO Output → value = 0x00000004
-    padctl[0] = 0x00000004;
-    klog("<6>tc358870: Configured PADCTL[PH.07]: 0x%08x", padctl[0]);
-    
-    // Set PH.07 as output (clear bit 7 in OE register)
-    volatile uint32_t *oe_reg = gpio_regs + (GPIO_OE_REG / 4);
-    oe_reg[0] &= ~(1U << 7); // Clear bit 7 for output
-    
-    klog("<6>tc358870: GPIO PWM initialized successfully");
-    return 0;
-}
-
-// Initialize PWM thread and hardware
-int init_pwm_thread(void) {
-    klog("<6>tc358870: Initializing PWM thread...");
-    
-    // Try hardware PWM first
-    for (int chip = 0; chip < PWM_CHIP_COUNT; chip++) {
-        char path[128];
-        snprintf(path, sizeof(path), "/sys/class/pwm/pwmchip%d", chip);
-        
-        if (access(path, F_OK) == 0) {
-            pwm_chip = chip;
-            klog("<6>tc358870: Found PWM chip %d", chip);
-            break;
-        }
-    }
-    
-    if (pwm_chip < 0) {
-        klog("<6>tc358870: No hardware PWM chip found, trying GPIO-based PWM...");
-        if (init_gpio_pwm() == 0) {
-            use_gpio_pwm = 1;
-            klog("<6>tc358870: Using GPIO-based PWM fallback");
-        } else {
-            klog("<3>tc358870: Both hardware PWM and GPIO PWM failed");
-            return -1;
-        }
-    }
-    
-    // Export PWM channel 0
-    char export_path[128];
-    snprintf(export_path, sizeof(export_path), "/sys/class/pwm/pwmchip%d/export", pwm_chip);
-    
-    FILE *fp = fopen(export_path, "w");
-    if (!fp) {
-        klog("<3>tc358870: Failed to export PWM channel");
-        return -1;
-    }
-    fprintf(fp, "%d", PWM_CHANNEL);
-    fclose(fp);
-    
-    pwm_exported = 1;
-    klog("<6>tc358870: Exported PWM channel %d", PWM_CHANNEL);
-    
-    // Set PWM period
-    char period_path[128];
-    snprintf(period_path, sizeof(period_path), PWM_PERIOD_PATH, pwm_chip, PWM_CHANNEL);
-    
-    fp = fopen(period_path, "w");
-    if (!fp) {
-        klog("<3>tc358870: Failed to set PWM period");
-        return -1;
-    }
-    fprintf(fp, "%d", PWM_PERIOD);
-    fclose(fp);
-    
-    // Set initial duty cycle (50% brightness)
-    int initial_duty = (current_brightness * PWM_MAX_DUTY) / BRIGHTNESS_MAX;
-    write_pwm_duty_cycle(initial_duty);
-    
-    // Enable PWM
-    char enable_path[128];
-    snprintf(enable_path, sizeof(enable_path), PWM_ENABLE_PATH, pwm_chip, PWM_CHANNEL);
-    
-    fp = fopen(enable_path, "w");
-    if (!fp) {
-        klog("<3>tc358870: Failed to enable PWM");
-        return -1;
-    }
-    fprintf(fp, "1");
-    fclose(fp);
-    
-    // Start PWM thread
-    pwm_running = 1;
-    if (pthread_create(&pwm_thread, NULL, pwm_thread_function, NULL) != 0) {
-        klog("<3>tc358870: Failed to create PWM thread");
-        pwm_running = 0;
-        return -1;
-    }
-    
-    klog("<6>tc358870: PWM thread initialized successfully");
-    return 0;
-}
-
-// Stop PWM thread
-void stop_pwm_thread(void) {
-    klog("<6>tc358870: Stopping PWM thread...");
-    pwm_running = 0;
-}
-
-// Generate GPIO-based PWM signal
-void generate_gpio_pwm(void) {
-    if (!use_gpio_pwm || gpio_regs == NULL) {
-        return;
-    }
-    
-    // Generate PWM signal by toggling GPIO
-    volatile uint32_t *out_reg = gpio_regs + (GPIO_OUT_REG / 4);
-    
-    // High period
-    for (int i = 0; i < gpio_pwm_high_cycles && pwm_running; i++) {
-        out_reg[0] |= (1U << 7);  // Set PH.07 HIGH
-        usleep(100);  // 100us high time
-    }
-    
-    // Low period
-    for (int i = 0; i < (gpio_pwm_total_cycles - gpio_pwm_high_cycles) && pwm_running; i++) {
-        out_reg[0] &= ~(1U << 7); // Set PH.07 LOW
-        usleep(100);  // 100us low time
-    }
-}
-
-// Cleanup PWM thread and hardware
-void cleanup_pwm_thread(void) {
-    klog("<6>tc358870: Cleaning up PWM thread...");
-    
-    // Stop thread
-    stop_pwm_thread();
-    
-    // Wait for thread to finish
-    if (pwm_thread) {
-        pthread_join(pwm_thread, NULL);
-    }
-    
-    // Disable and unexport hardware PWM
-    if (pwm_chip >= 0 && !use_gpio_pwm) {
-        char enable_path[128];
-        snprintf(enable_path, sizeof(enable_path), PWM_ENABLE_PATH, pwm_chip, PWM_CHANNEL);
-        
-        FILE *fp = fopen(enable_path, "w");
-        if (fp) {
-            fprintf(fp, "0");
-            fclose(fp);
-        }
-        
-        char unexport_path[128];
-        snprintf(unexport_path, sizeof(unexport_path), PWM_UNEXPORT_PATH, pwm_chip);
-        
-        fp = fopen(unexport_path, "w");
-        if (fp) {
-            fprintf(fp, "0");
-            fclose(fp);
-        }
-        
-        pwm_chip = -1;
-    }
-    
-    // Cleanup GPIO PWM
-    if (use_gpio_pwm && gpio_regs != NULL) {
-        // Set GPIO low before cleanup
-        volatile uint32_t *out_reg = gpio_regs + (GPIO_OUT_REG / 4);
-        out_reg[0] &= ~(1U << 7); // Set PH.07 LOW
-        
-        munmap((void*)gpio_regs, GPIO_PWM_SIZE);
-        gpio_regs = NULL;
-        
-        if (gpio_mem_fd >= 0) {
-            close(gpio_mem_fd);
-            gpio_mem_fd = -1;
-        }
-        
-        use_gpio_pwm = 0;
-    }
-    
-    // Cleanup mutex and condition variable
-    pthread_mutex_destroy(&pwm_mutex);
-    pthread_cond_destroy(&pwm_condition);
-    
-    klog("<6>tc358870: PWM thread cleanup complete");
-}
-
-// Set brightness (0-100%)
-int set_brightness(int percentage) {
-    if (percentage < 0 || percentage > BRIGHTNESS_MAX) {
-        klog("<3>tc358870: Invalid brightness value: %d", percentage);
-        return -1;
-    }
-    
-    pthread_mutex_lock(&pwm_mutex);
-    target_brightness = percentage;
-    pthread_mutex_unlock(&pwm_mutex);
-    
-    klog("<6>tc358870: Brightness target set to %d%%", percentage);
-    return 0;
-}
-
-// Get current brightness
-int get_brightness(void) {
-    pthread_mutex_lock(&pwm_mutex);
-    int brightness = current_brightness;
-    pthread_mutex_unlock(&pwm_mutex);
-    
-    return brightness;
-}
-
 // Signal handler for clean shutdown
 void signal_handler(int signum) {
     klog("<6>tc358870: Received signal %d. Exiting gracefully.", signum);
-    cleanup_pwm_thread();
     closelog();
     exit(0);
 }
 
+// Placeholder for brightness control functions (if implemented)
+// These would typically involve writing to a PWM register
+int init_brightness_control() {
+    klog("<6>tc358870: init_brightness_control called (placeholder)");
+    // In a real application, you would initialize PWM here
+    // For example: i2c_write8(fd, 0x8600, 0x00); // AUD_Auto_Mute
+    return 0; // Return 0 for success
+}
 
+int set_brightness(int percent) {
+    klog("<6>tc358870: set_brightness called with %d%% (placeholder)", percent);
+    // In a real application, you would write to a PWM register
+    // For example: i2c_write8(fd, 0x8600, (uint8_t)(percent * 2.55)); // AUD_Auto_Mute
+    return 0; // Return 0 for success
+}
+
+int get_brightness() {
+    klog("<6>tc358870: get_brightness called (placeholder)");
+    // In a real application, you would read from a PWM register
+    // For example: return i2c_read8_simple(fd, 0x8600); // AUD_Auto_Mute
+    return 50; // Return a default value
+}
 
 int main() {
     openlog("tc358870_init", LOG_PID | LOG_CONS, LOG_USER);
@@ -1273,31 +967,31 @@ int main() {
 
     klog("<6>TC358870 RS1 init complete");
     
-    // // Initialize PWM thread for brightness control (like STM32 PWM)
-    // klog("<6>tc358870: Initializing PWM thread for brightness control...");
-    // if (init_pwm_thread() == 0) {
-    //     klog("<6>tc358870: PWM thread started successfully");
+    // Initialize brightness control (like STM32 PWM)
+    klog("<6>tc358870: Initializing brightness control...");
+    if (init_brightness_control() == 0) {
+        klog("<6>tc358870: Brightness control started successfully");
         
-    //     // Test brightness control - fade from 20% to 80% and back
-    //     klog("<6>tc358870: Testing brightness control...");
-    //     set_brightness(20);
-    //     sleep(2);
-    //     set_brightness(80);
-    //     sleep(2);
-    //     set_brightness(50); // Back to default
+        // Test brightness control - fade from 20% to 80% and back
+        klog("<6>tc358870: Testing brightness control...");
+        set_brightness(20);
+        sleep(2);
+        set_brightness(80);
+        sleep(2);
+        set_brightness(50); // Back to default
         
-    //     klog("<6>tc358870: Brightness control test complete. Current brightness: %d%%", get_brightness());
+        klog("<6>tc358870: Brightness control test complete. Current brightness: %d%%", get_brightness());
         
-    //     // Keep the program running to maintain the PWM thread
-    //     klog("<6>tc358870: Program running with PWM thread. Press Ctrl+C to exit.");
-    //     klog("<6>tc358870: PWM thread is continuously adjusting brightness in background");
+        // Keep the program running to maintain the background thread
+        // In a real application, you might want to add a control interface here
+        klog("<6>tc358870: Program running with brightness control. Press Ctrl+C to exit.");
         
-    //     while (1) {
-    //         sleep(10); // Keep main thread alive while PWM thread runs
-    //     }
-    // } else {
-    //     klog("<3>tc358870: Failed to initialize PWM thread");
-    // }
+        while (1) {
+            sleep(10); // Keep main thread alive
+        }
+    } else {
+        klog("<3>tc358870: Failed to initialize brightness control");
+    }
 
     klog("<6>TC358870 init sequence finished");
     closelog();
